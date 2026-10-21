@@ -38,7 +38,6 @@
         glib
         libsoup_3
         alsa-lib
-        onnxruntime
         libayatana-appindicator
         libevdev
         libxtst
@@ -60,10 +59,6 @@
 
       # Shared environment variables for Rust/native builds
       commonEnv = pkgs: let lib = pkgs.lib; in {
-        LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-        BINDGEN_EXTRA_CLANG_ARGS = "-isystem ${pkgs.llvmPackages.libclang.lib}/lib/clang/${lib.getVersion pkgs.llvmPackages.libclang}/include -isystem ${pkgs.glibc.dev}/include";
-        ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
-        ORT_PREFER_DYNAMIC_LINK = "1";
         GST_PLUGIN_SYSTEM_PATH_1_0 = "${lib.makeSearchPathOutput "lib" "lib/gstreamer-1.0" (gstPlugins pkgs)}";
       };
 
@@ -94,6 +89,8 @@
             src = self;
 
             cargoRoot = "src-tauri";
+            buildAndTestSubdir = "src-tauri";
+            tauriBundleType = "deb";
 
             cargoLock = {
               lockFile = ./src-tauri/Cargo.lock;
@@ -105,7 +102,7 @@
             };
 
             postPatch = ''
-              ${pkgs.jq}/bin/jq 'del(.build.beforeBuildCommand) | .bundle.createUpdaterArtifacts = false' \
+              ${pkgs.jq}/bin/jq '.bundle.createUpdaterArtifacts = false' \
                 src-tauri/tauri.conf.json > $TMPDIR/tauri.conf.json
               cp $TMPDIR/tauri.conf.json src-tauri/tauri.conf.json
 
@@ -148,30 +145,13 @@
               pkgs.bun2nix.hook # Sets up node_modules from pre-fetched bun cache
               jq
               cmake
-              llvmPackages.libclang
+              rustPlatform.bindgenHook
               shaderc
             ];
-
-            preBuild = ''
-              # bun2nix.hook has already set up node_modules from pre-fetched cache.
-              # Build the frontend with bun (tsc + vite).
-              export HOME=$TMPDIR
-              bun run build
-            '';
 
             # Tests require runtime resources (audio devices, model files, GPU/Vulkan)
             # not available in the Nix build sandbox
             doCheck = false;
-
-            # The tauri hook's installPhase expects target/ in cwd, but our
-            # cargoRoot puts it under src-tauri/. Override to extract the DEB.
-            installPhase = ''
-              runHook preInstall
-              mkdir -p $out
-              cd src-tauri
-              mv target/${pkgs.stdenv.hostPlatform.rust.rustcTarget}/release/bundle/deb/*/data/usr/* $out/
-              runHook postInstall
-            '';
 
             buildInputs = commonNativeDeps pkgs ++ (with pkgs; [
               glib-networking
@@ -184,14 +164,12 @@
 
             preFixup = ''
               gappsWrapperArgs+=(
-                --set WEBKIT_DISABLE_DMABUF_RENDERER 1
+                --set-default WEBKIT_DISABLE_DMABUF_RENDERER 1
                 --set ALSA_PLUGIN_DIR "${combinedAlsaPlugins}"
-                --prefix LD_LIBRARY_PATH : "${
-                  lib.makeLibraryPath [
-                    pkgs.vulkan-loader
-                    pkgs.onnxruntime
-                  ]
-                }"
+                # Self-update can't work against an immutable /nix/store install
+                # (downloadAndInstall would try to overwrite the store path), so
+                # the Nix-built package always disables the updater.
+                --set HANDY_DISABLE_UPDATER 1
               )
             '';
 
@@ -246,18 +224,14 @@
               # Build tools
               cargo-tauri
               pkg-config
-              llvmPackages.libclang
+              rustPlatform.bindgenHook
               cmake
             ]);
 
             inherit (commonEnv pkgs)
-              LIBCLANG_PATH
-              BINDGEN_EXTRA_CLANG_ARGS
-              ORT_LIB_LOCATION
-              ORT_PREFER_DYNAMIC_LINK
               GST_PLUGIN_SYSTEM_PATH_1_0;
 
-            LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath [ pkgs.libayatana-appindicator pkgs.onnxruntime pkgs.vulkan-loader ]}";
+            LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath [ pkgs.libayatana-appindicator pkgs.vulkan-loader ]}";
 
             # Same as wrapGAppsHook4
             XDG_DATA_DIRS = "${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}:${pkgs.hicolor-icon-theme}/share";

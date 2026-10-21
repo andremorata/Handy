@@ -25,20 +25,18 @@ interface ModelsStore {
   currentModel: string;
   downloadingModels: Record<string, true>;
   verifyingModels: Record<string, true>;
-  extractingModels: Record<string, true>;
   downloadProgress: Record<string, DownloadProgress>;
   downloadStats: Record<string, DownloadStats>;
   loading: boolean;
   error: string | null;
-  hasAnyModels: boolean;
-  isFirstRun: boolean;
   initialized: boolean;
+  isRescanning: boolean;
 
   // Actions
   initialize: () => Promise<void>;
   loadModels: () => Promise<void>;
   loadCurrentModel: () => Promise<void>;
-  checkFirstRun: () => Promise<boolean>;
+  rescanLocalModels: () => Promise<void>;
   selectModel: (modelId: string) => Promise<boolean>;
   downloadModel: (modelId: string) => Promise<boolean>;
   cancelDownload: (modelId: string) => Promise<boolean>;
@@ -46,7 +44,6 @@ interface ModelsStore {
   getModelInfo: (modelId: string) => ModelInfo | undefined;
   isModelDownloading: (modelId: string) => boolean;
   isModelVerifying: (modelId: string) => boolean;
-  isModelExtracting: (modelId: string) => boolean;
   getDownloadProgress: (modelId: string) => DownloadProgress | undefined;
 
   // Internal setters
@@ -62,14 +59,12 @@ export const useModelStore = create<ModelsStore>()(
     currentModel: "",
     downloadingModels: {},
     verifyingModels: {},
-    extractingModels: {},
     downloadProgress: {},
     downloadStats: {},
     loading: true,
     error: null,
-    hasAnyModels: false,
-    isFirstRun: false,
     initialized: false,
+    isRescanning: false,
 
     // Internal setters
     setModels: (models) => set({ models }),
@@ -128,18 +123,19 @@ export const useModelStore = create<ModelsStore>()(
       }
     },
 
-    checkFirstRun: async () => {
+    rescanLocalModels: async () => {
+      set({ isRescanning: true });
       try {
-        const result = await commands.hasAnyModelsAvailable();
-        if (result.status === "ok") {
-          const hasModels = result.data;
-          set({ hasAnyModels: hasModels, isFirstRun: !hasModels });
-          return !hasModels;
+        const result = await commands.rescanLocalModels();
+        if (result.status !== "ok") {
+          set({ error: `Failed to rescan models: ${result.error}` });
         }
-        return false;
+        // On success the backend emits `models-updated`, which reloads the list
+        // via the listener registered in initialize().
       } catch (err) {
-        console.error("Failed to check model availability:", err);
-        return false;
+        set({ error: `Failed to rescan models: ${err}` });
+      } finally {
+        set({ isRescanning: false });
       }
     },
 
@@ -148,11 +144,7 @@ export const useModelStore = create<ModelsStore>()(
         set({ error: null });
         const result = await commands.setActiveModel(modelId);
         if (result.status === "ok") {
-          set({
-            currentModel: modelId,
-            isFirstRun: false,
-            hasAnyModels: true,
-          });
+          set({ currentModel: modelId });
           return true;
         } else {
           set({ error: `Failed to switch to model: ${result.error}` });
@@ -262,10 +254,6 @@ export const useModelStore = create<ModelsStore>()(
       return modelId in get().verifyingModels;
     },
 
-    isModelExtracting: (modelId: string) => {
-      return modelId in get().extractingModels;
-    },
-
     getDownloadProgress: (modelId: string) => {
       return get().downloadProgress[modelId];
     },
@@ -273,10 +261,10 @@ export const useModelStore = create<ModelsStore>()(
     initialize: async () => {
       if (get().initialized) return;
 
-      const { loadModels, loadCurrentModel, checkFirstRun } = get();
+      const { loadModels, loadCurrentModel } = get();
 
       // Load initial data
-      await Promise.all([loadModels(), loadCurrentModel(), checkFirstRun()]);
+      await Promise.all([loadModels(), loadCurrentModel()]);
 
       // Set up event listeners
       listen<DownloadProgress>("model-download-progress", (event) => {
@@ -372,38 +360,6 @@ export const useModelStore = create<ModelsStore>()(
         );
       });
 
-      listen<string>("model-extraction-started", (event) => {
-        const modelId = event.payload;
-        set(
-          produce((state) => {
-            state.extractingModels[modelId] = true;
-          }),
-        );
-      });
-
-      listen<string>("model-extraction-completed", (event) => {
-        const modelId = event.payload;
-        set(
-          produce((state) => {
-            delete state.extractingModels[modelId];
-          }),
-        );
-        get().loadModels();
-      });
-
-      listen<{ model_id: string; error: string }>(
-        "model-extraction-failed",
-        (event) => {
-          const modelId = event.payload.model_id;
-          set(
-            produce((state) => {
-              delete state.extractingModels[modelId];
-              state.error = `Failed to extract model: ${event.payload.error}`;
-            }),
-          );
-        },
-      );
-
       listen<string>("model-download-cancelled", (event) => {
         const modelId = event.payload;
         set(
@@ -422,6 +378,11 @@ export const useModelStore = create<ModelsStore>()(
       });
 
       listen("model-state-changed", () => {
+        get().loadModels();
+        get().loadCurrentModel();
+      });
+
+      listen("models-updated", () => {
         get().loadModels();
         get().loadCurrentModel();
       });
